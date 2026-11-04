@@ -8,6 +8,7 @@ helpers, geographic utilities (haversine), GPS-week / iTOW conversion.
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -24,8 +25,16 @@ CODE_DIR = Path(__file__).resolve().parent.parent  # code/
 CONFIG_DIR = CODE_DIR / "config"
 
 
-def load_config(name: str = "pipeline") -> dict[str, Any]:
-    """Load a YAML config file from ``code/config/``."""
+def load_config(name: str | None = None) -> dict[str, Any]:
+    """Load a YAML config file from ``code/config/``.
+
+    The pipeline config (``name is None``) is selected by the
+    ``ANTARCTICA_PIPELINE`` env var (default ``pipeline``), so the same code
+    runs another dataset (``config/<name>.yaml``) with separate paths. Named
+    configs (``receiver``, ``ports``) are shared and unaffected.
+    """
+    if name is None:
+        name = os.environ.get("ANTARCTICA_PIPELINE", "pipeline")
     p = CONFIG_DIR / f"{name}.yaml"
     with p.open() as fh:
         return yaml.safe_load(fh)

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -28,7 +29,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("ubx.cli")
 
-_DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "config" / "pipeline.yaml"
+_DEFAULT_CONFIG = (
+    Path(__file__).resolve().parent.parent / "config"
+    / f"{os.environ.get('ANTARCTICA_PIPELINE', 'pipeline')}.yaml"
+)
 
 
 def _load_config(path: str | Path | None = None) -> dict:

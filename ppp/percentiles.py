@@ -46,18 +46,36 @@ log = logging.getLogger(__name__)
 PERCENTILES = [1, 5, 10, 50, 90, 95, 99]
 
 
+# Epochs with a time tag before 2025-01-01 come from the cold start (receiver
+# clock not set); the file inventory excludes them in the same way.
+BOOT_T_NS = 1_735_689_600 * 10**9
+
+
 def _onboard_sigmas(cfg: dict) -> dict[str, np.ndarray]:
-    """Concatenate onboard hAcc/vAcc (metres) across all staged days."""
+    """Concatenate onboard hAcc/vAcc (metres) across all staged days.
+
+    One value per navigation epoch: HPPOSLLH records are restricted to the
+    UBX-NAV-PVT epochs of the file inventory (time tag after BOOT_T_NS), and an
+    epoch recorded twice is counted once, so the number of values equals the
+    number of navigation epochs given in the paper.
+    """
     hAcc: list[np.ndarray] = []
     vAcc: list[np.ndarray] = []
     for day in list_days(cfg):
         p = staged_path(day, "nav_hpposllh", cfg)
-        if not p.exists():
+        p_pvt = staged_path(day, "nav_pvt", cfg)
+        if not p.exists() or not p_pvt.exists():
             continue
         try:
             df = read_parquet(p)
+            epochs = (read_parquet(p_pvt).select("t_ns")
+                      .filter(pl.col("t_ns") > BOOT_T_NS).unique())
         except Exception:  # noqa: BLE001
             continue
+        if df.is_empty():
+            continue
+        df = (df.unique(subset=["t_ns"], keep="first", maintain_order=True)
+                .join(epochs, on="t_ns", how="semi"))
         if df.is_empty():
             continue
         hAcc.append(

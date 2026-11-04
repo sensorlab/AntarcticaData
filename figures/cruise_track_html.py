@@ -56,8 +56,8 @@ def _decimated_track(df: pl.DataFrame) -> pl.DataFrame:
     # u-blox receiver clock is sometimes left at 1970 / week-rollover
     # values until first GPS-time sync; those rows produce huge time
     # gaps and decimation collisions.
-    T_MIN = 1_735_689_600 * 1_000_000_000   # 2025-01-01 UTC — pre-cruise
-    T_MAX = 1_798_761_600 * 1_000_000_000   # 2027-01-01 UTC — post-cruise
+    T_MIN = 1_483_228_800 * 1_000_000_000   # 2017-01-01 UTC — wide sanity bound
+    T_MAX = 1_893_456_000 * 1_000_000_000   # 2030-01-01 UTC — wide sanity bound
     df = df.filter(
         (pl.col("t_ns") > T_MIN) & (pl.col("t_ns") < T_MAX)
         & ~((pl.col("lat") == 0.0) & (pl.col("lon") == 0.0))
