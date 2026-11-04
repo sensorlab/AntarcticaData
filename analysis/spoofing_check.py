@@ -11,41 +11,48 @@ summary plus the worst-offender epochs to ``derived/spoofing/<day>.parquet``.
 1. **AGC drop without RFI** — spoofers transmit much stronger than real
    GPS, causing receiver AGC to reduce while jamInd stays nominal.
    Real RFI raises *both* AGC noise and jamInd. Score: ``agc_drop`` is
-   1.0 when AGC drops > 2σ below the daily median while jamInd ≤ 32.
+   1.0 when the L1 AGC count is more than 2σ (daily standard deviation)
+   below its daily median while the L1 jamInd is ≤ 32, else 0.
 
-2. **CN0 uniformity** — real SVs span a 20-dB CN0 range driven by
+2. **CN0 uniformity** — real SVs span a wide CN0 range driven by
    elevation/multipath. A spoofer with a single antenna transmits all
    SVs at uniform CN0. Score: ``cno_uniformity`` = 1 − std(CN0 of used
-   SVs) / 12 (clamped to [0, 1]); high means SVs are suspiciously
-   uniform.
+   SVs above 5° elevation) / 12 dB-Hz (clamped to [0, 1]); high means SVs
+   are suspiciously uniform. Authentic signals give a per-epoch std of
+   about 5 dB-Hz with this receiver, i.e. a score of about 0.55.
 
-3. **CN0 vs elevation flatness** — real CN0 increases ~1.5–2 dB/10°
-   elevation. Spoofed signals from a single direction show no such
-   trend. Score: ``cno_elev_slope`` = 1 when |slope| < 0.5 dB/10°,
-   linearly down to 0 at slope ≥ 1.5 dB/10°.
+3. **CN0 vs elevation flatness** — real CN0 increases with elevation
+   (median slope 0.15–0.17 dB-Hz per degree on test days of the 2025/26
+   cruise). Spoofed signals from a single direction show no such trend.
+   Score: ``cno_elev_slope`` = 1 − |slope| / 0.15 dB-Hz per degree,
+   clamped to [0, 1] (1 for a flat profile, 0 at |slope| ≥ 0.15).
 
 4. **Per-constellation consistency** — hard to spoof all GNSS at once.
-   Score: ``constellation_inconsistency`` = std of per-constellation
-   mean prResidual; high when one system's residuals diverge from
+   Score: ``constellation_inconsistency`` = std over the used SVs of the
+   mean pseudorange residual of their constellation, divided by 10 m and
+   clamped to [0, 1]; high when one system's residuals diverge from
    others.
 
 5. **Position vs velocity coherence** — if reported speed is nonzero
    but consecutive positions don't move (or vice versa), the fix is
-   internally inconsistent. Score: ``pos_vel_mismatch`` based on
-   ``|haversine_speed − gSpeed| / max(gSpeed, 0.1)``.
+   internally inconsistent. Score: ``pos_vel_mismatch`` =
+   ``|haversine_speed − gSpeed| / max(gSpeed, 0.1 m/s) / 5``, clamped to
+   [0, 1].
 
 6. **Time discontinuity** — spoofers occasionally introduce time
    offsets. Score: ``time_jump`` = 1 if `iTOW` jumps non-monotonically
    between consecutive PVT epochs.
 
-7. **High-precision/Kalman divergence** — `NAV-HPPOSLLH` and
-   `NAV-PVT` come from different filter chains; spoofing affects them
-   differently in some cases. Score: ``hp_pvt_div`` rises when 3D
-   distance > 0.5 m.
+7. **HPPOSLLH/PVT divergence** — `NAV-HPPOSLLH` and `NAV-PVT` carry the
+   same navigation solution at different resolutions (about 1 cm for PVT),
+   so they should never differ by more than a few millimetres. A larger
+   difference means inconsistent receiver output. Score: ``hp_pvt_div``
+   = horizontal distance / 0.5 m, clamped to [0, 1].
 
-The weighted sum of indicators is the **suspicion score** ∈ [0, 7].
-Score ≥ 3 in steady-state is worth visual inspection; ≥ 5 is a strong
-spoofing flag.
+The unweighted sum of the seven indicators is the **suspicion score**
+∈ [0, 7]. Score ≥ 3 marks an epoch for inspection; ≥ 5 is a strong
+spoofing flag. The thresholds are heuristic and have not been calibrated
+against recorded spoofing attacks.
 
 ## CLI
 

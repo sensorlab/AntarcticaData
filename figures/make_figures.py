@@ -45,7 +45,7 @@ log = logging.getLogger(__name__)
 
 
 def _load_track_segments(cfg: dict) -> list[tuple[str, np.ndarray, np.ndarray]] | None:
-    """Continuous (label, lon[], lat[]) segments for the cruise track.
+    r"""Continuous (label, lon[], lat[]) segments for the cruise track.
 
     Builds a single 1-min-decimated cruise track from
     ``derived/track/track.all.parquet``, then splits it into segments at:
@@ -172,17 +172,24 @@ def fig01_cruise_track(
     cfg: dict,
     *,
     decimate_min: int = 5,
-    central_lon: float = 160.0,
+    central_lon: float = 220.0,
 ) -> Path:
     """Static cruise-track map rendered as a scatter point cloud (one dot
     per ``decimate_min`` minutes) coloured by UTC date.
 
-    ``central_lon`` shifts the projection so the cruise activity is
-    moved away from the map edges. Default 160°E puts Lyttelton /
-    Mario Zucchelli near the centre and the Atlantic descent on the
-    left half of the map; set to 0 for Greenwich-centred, to 180 for
-    dateline-centred, or to ``-90`` to put the Americas in the
-    centre. Drawing dots rather than a polyline sidesteps the
+    ``central_lon`` shifts the projection so the Robinson wrap line
+    falls in a longitude band the cruise never visits. The cruise
+    spans roughly 80°W (Panama) eastward through 0° (Greenwich /
+    Trieste at 13.8°E) and westward across the Pacific to 172°E
+    (Lyttelton), so the only un-visited band is approximately
+    30°E–160°E (Middle East / Indian Ocean / Asia). The default
+    ``220`` (equivalent to -140°E) puts the visual centre over the
+    central Pacific and the wrap meridian at +40°E (Red Sea /
+    Arabian peninsula), so the Trieste → Atlantic → Panama →
+    Pacific → New Zealand → Mario Zucchelli loop renders
+    continuously. Set to 0 for Greenwich-centred or 160 for the older
+    Pacific-centred layout (both split the cruise across the wrap).
+    Drawing dots rather than a polyline sidesteps the
     antimeridian-crossing and data-gap artefacts that produce
     spurious straight lines on a global projection. Tries cartopy
     → geopandas fallback → plain matplotlib.
@@ -219,8 +226,14 @@ def fig01_cruise_track(
         except Exception:  # noqa: BLE001
             pass
         ax.gridlines(linewidth=0.2, color="0.7")
+        # rasterized=True collapses the tens of thousands of dots into
+        # a single embedded raster image inside the otherwise-vector
+        # PDF (keeps the figure size manageable; otherwise each dot
+        # becomes its own vector primitive and the PDF balloons to
+        # 100+ MB). Everything else on the axes stays vector and crisp.
         ax.scatter(lon, lat, c=t_norm, cmap=cmap, s=1.2, alpha=0.85,
-                    edgecolors="none", transform=ccrs.PlateCarree(), zorder=4)
+                    edgecolors="none", transform=ccrs.PlateCarree(),
+                    zorder=4, rasterized=True)
         for plon, plat, ptxt in [
             (13.809, 45.613, "Trieste"),
             (-79.54, 8.87, "Panama"),
@@ -258,7 +271,7 @@ def fig01_cruise_track(
             if world is not None:
                 world.plot(ax=ax, color="0.92", edgecolor="0.55", linewidth=0.3)
             ax.scatter(lon, lat, c=t_norm, cmap=cmap, s=1.2, alpha=0.85,
-                        edgecolors="none")
+                        edgecolors="none", rasterized=True)
             ax.set_xlim(-180, 180)
             ax.set_ylim(-90, 90)
             ax.set_xlabel("Longitude (°E)")
@@ -269,7 +282,7 @@ def fig01_cruise_track(
             log.warning("geopandas fallback failed (%s); plotting plain", exc2)
             ax = fig.add_subplot(1, 1, 1)
             ax.scatter(lon, lat, c=t_norm, cmap=cmap, s=1.2, alpha=0.85,
-                        edgecolors="none")
+                        edgecolors="none", rasterized=True)
             ax.set_xlim(-180, 180)
             ax.set_ylim(-90, 90)
             ax.set_xlabel("Longitude (°E)")
@@ -288,7 +301,9 @@ def fig01_cruise_track(
     # as distinct paths. Needs visual iteration — leave commented for now.
     log.info("fig01 backend: %s, n_points: %d", used, len(lon))
     fig.tight_layout()
-    fig.savefig(fig_path)
+    # dpi=200 sets the resolution at which the rasterized scatter
+    # layer is rendered inside the PDF (the rest stays vector).
+    fig.savefig(fig_path, dpi=200)
     plt.close(fig)
     return fig_path
 
@@ -345,7 +360,31 @@ def fig05_multipath(out_dir: Path, cfg: dict, day: str | None = None) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def fig11_rf_waterfall(out_dir: Path, cfg: dict, day: str | None = None) -> Path:
+def _spectrogram_has_data(p: Path) -> bool:
+    """True iff the .npz holds a non-empty spectrogram.
+
+    ``spectrum.py`` writes an empty-sentinel .npz (``empty=True``, zero-length
+    spectrogram) for days with no MON-SPAN so the Snakemake output contract
+    holds. Figure code must skip those — selecting one and handing its
+    ``(0, 2, 256)`` array to ``pcolormesh`` raises "Dimensions of C (256, 0)".
+    """
+    try:
+        a = np.load(p, allow_pickle=False)
+    except Exception:  # noqa: BLE001
+        return False
+    if "empty" in a.files and bool(a["empty"]):
+        return False
+    return bool(a["spectrogram"].shape[0] > 0)
+
+
+def fig11_rf_waterfall(out_dir: Path, cfg: dict, day: str | None = None,
+                       mode: str = "amplitude") -> Path:
+    """RF spectrum of one day from the 1-min spectrogram.
+
+    ``mode="amplitude"`` (default, Fig. 9 of the paper) shows the uncalibrated
+    UBX-MON-SPAN amplitude; ``mode="residual"`` shows the amplitude above the
+    median of each frequency bin, which makes short excursions easier to see.
+    """
     fig_path = out_dir / "fig11_daily_rf_waterfall.pdf"
     days = [day] if day else list_days(cfg)
     # The first cruise day (20250926) covers only ~15 h after cold-start
@@ -359,7 +398,7 @@ def fig11_rf_waterfall(out_dir: Path, cfg: dict, day: str | None = None) -> Path
     day_used: str | None = None
     if day is None and PREFERRED in days:
         p = derived_dir(cfg) / "spectrum" / f"{PREFERRED}.spectrogram.npz"
-        if p.exists():
+        if p.exists() and _spectrogram_has_data(p):
             src = p
             day_used = PREFERRED
     if src is None:
@@ -367,7 +406,7 @@ def fig11_rf_waterfall(out_dir: Path, cfg: dict, day: str | None = None) -> Path
             if day is None and d in PARTIAL_DAYS:
                 continue
             p = derived_dir(cfg) / "spectrum" / f"{d}.spectrogram.npz"
-            if p.exists():
+            if p.exists() and _spectrogram_has_data(p):
                 src = p
                 day_used = d
                 break
@@ -396,20 +435,45 @@ def fig11_rf_waterfall(out_dir: Path, cfg: dict, day: str | None = None) -> Path
     t_dt = np.asarray(t_s, dtype=np.int64).astype("datetime64[s]")
     import matplotlib.dates as mdates  # noqa: PLC0415
     for ax, block, freq, title in (
-        (axes[0], spec[:, 0, :], freq_l1, "L1 band"),
-        (axes[1], spec[:, 1, :], freq_l2, "L5 band"),
+        (axes[0], spec[:, 0, :], freq_l1, "L1 RF block"),
+        (axes[1], spec[:, 1, :], freq_l2, "L5 RF block"),
     ):
-        im = ax.pcolormesh(t_dt, freq, block.T, cmap="magma", shading="auto")
-        ax.set_ylabel("Freq (MHz)")
+        if mode == "residual":
+            # Amplitude *residual above the per-frequency-bin baseline*:
+            # the raw distribution is dominated by the static spatial
+            # structure (carrier bands high, noise floor low), so most of the
+            # colour range is consumed by that baseline rather than by the
+            # time-domain changes (jamming spikes, AGC transients). Subtracting
+            # the per-bin median leaves a residual centred near zero with
+            # excursions sharply visible (cf. Bertalanič et al. 2026, Fig. 4).
+            bin_baseline = np.nanmedian(block, axis=0)
+            values = block.astype(np.float32) - bin_baseline[np.newaxis, :]
+            cmap, cb_label = "turbo", "Amplitude above\nbin median (counts)"
+        else:
+            values = block.astype(np.float32)
+            cmap, cb_label = "magma", "Amplitude (0–255)"
+        finite = values[np.isfinite(values)]
+        if finite.size:
+            vmin = float(np.percentile(finite, 1.0))
+            vmax = float(np.percentile(finite, 99.0))
+            if vmax <= vmin:
+                vmax = vmin + 1.0
+        else:
+            vmin, vmax = -50.0, 50.0
+        # The mesh is rasterised so that the PDF stays small; axes and labels
+        # remain vector graphics.
+        im = ax.pcolormesh(t_dt, freq, values.T, cmap=cmap, shading="auto",
+                           vmin=vmin, vmax=vmax, rasterized=True)
+        ax.set_ylabel("Frequency (MHz)")
         ax.set_title(title)
-        fig.colorbar(im, ax=ax,
-                     label="Spectrum amplitude (UBX-MON-SPAN raw, 0–255)")
+        fig.colorbar(im, ax=ax, label=cb_label)
     axes[1].xaxis.set_major_locator(mdates.HourLocator(interval=3))
     axes[1].xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
     axes[1].set_xlabel(f"UTC time on {day_used[:4]}-{day_used[4:6]}-{day_used[6:8]}")
-    fig.suptitle(f"MON-SPAN RF spectrum — day {day_used}")
+    fig.suptitle(f"UBX-MON-SPAN RF spectrum, 1-min averages, "
+                 f"{day_used[:4]}-{day_used[4:6]}-{day_used[6:8]}")
     fig.tight_layout()
-    fig.savefig(fig_path)
+    fig.savefig(fig_path, dpi=300)
     plt.close(fig)
     return fig_path
 
@@ -439,9 +503,10 @@ def fig12_temp_agc(out_dir: Path, cfg: dict, day: str | None = None) -> Path:
     rf_df = pl.concat(rf_parts, how="vertical").sort("t_ns")
     # Cruise-window filter: MON-SYS and MON-RF occasionally carry rows
     # with t_ns=0 (cold-start / corrupt frames) that stretch the x-axis
-    # from 1970 to 2030+. Drop anything outside [2025-01-01, 2027-01-01).
-    T_MIN_NS = 1_735_689_600_000_000_000
-    T_MAX_NS = 1_798_761_600_000_000_000
+    # from 1970 to 2030+. Drop anything outside a wide 2017-2030 sanity window
+    # (spans both the 2025 and 2026 cruises).
+    T_MIN_NS = 1_483_228_800_000_000_000    # 2017-01-01 UTC
+    T_MAX_NS = 1_893_456_000_000_000_000    # 2030-01-01 UTC
     sys_df = sys_df.filter(
         (pl.col("t_ns") >= T_MIN_NS) & (pl.col("t_ns") < T_MAX_NS)
     )
@@ -541,9 +606,11 @@ FIGURES: dict[str, Callable[..., Path]] = {
 @click.option("--day", default=None, help="Restrict per-day figures to this YYYYMMDD")
 @click.option("--only", default=None, help="Comma-separated figXX list")
 @click.option("--quick", is_flag=True, default=False, help="Smoke-test mode (per-day figures only)")
-@click.option("--central-lon", default=160.0, type=float, show_default=True,
+@click.option("--central-lon", default=220.0, type=float, show_default=True,
               help="Robinson projection central longitude for fig01 "
-                    "(160=Pacific-centred, 0=Greenwich, -90=Americas, 180=dateline)")
+                    "(220 = -140°E, centred over mid-Pacific; wraps at "
+                    "+40°E, inside the cruise's un-visited band; "
+                    "160=Pacific, 0=Greenwich, 180=dateline)")
 @click.option("--decimate-min", default=5, type=int, show_default=True,
               help="Per-N-minute dot decimation for fig01")
 def main(day: str | None, only: str | None, quick: bool,

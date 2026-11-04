@@ -72,8 +72,12 @@ def build_day_track(day: str, *, decimate_hz: float = 1.0, cfg: dict | None = No
     if pvt.is_empty():
         return pl.DataFrame()
 
-    T_MIN = 1_735_689_600 * 1_000_000_000   # 2025-01-01 UTC — pre-cruise
-    T_MAX = 1_798_761_600 * 1_000_000_000   # 2027-01-01 UTC — post-cruise
+    # Wide sanity bound (2017-2030) to reject 1970 / GPS-week-rollover
+    # timestamps from before first time-sync. NOT cruise-specific: spans both
+    # the 2025 cruise (from Oct 2024) and the 2026 cruise. A tight per-cruise
+    # window here silently dropped the 2025 cruise's Oct-Dec 2024 first half.
+    T_MIN = 1_483_228_800 * 1_000_000_000   # 2017-01-01 UTC
+    T_MAX = 1_893_456_000 * 1_000_000_000   # 2030-01-01 UTC
     # Reject stale-cache coordinates that pass the fixType filter but
     # carry large positional uncertainty. Typical at-sea hAcc is <1 m;
     # an hAcc above ~50 m at fixType ≥ 3 is almost always a re-acquisition
@@ -91,8 +95,15 @@ def build_day_track(day: str, *, decimate_hz: float = 1.0, cfg: dict | None = No
         return pl.DataFrame()
 
     # Use HPPOSLLH for sub-mm precision when available; otherwise PVT.
-    if hp_path.exists():
-        hp = read_parquet(hp_path)
+    # The parser writes a *schema-only, zero-row* nav_hpposllh.parquet on days
+    # where the receiver logged no NAV-HPPOSLLH (the 2025 cruise's 'dan_' files
+    # carry a leaner message set — NAV-PVT but no HPPOSLLH). `.exists()` alone
+    # would then take the HPPOSLLH branch, and `hp.select(...)` on an empty
+    # frame yields a 0-row *typed* track that skips decimation/speed-filter and
+    # is returned as-is — silently discarding a whole day of pristine NAV-PVT.
+    # Guard on non-empty so those days fall back to the PVT branch.
+    hp = read_parquet(hp_path) if hp_path.exists() else None
+    if hp is not None and not hp.is_empty():
         # Build high-precision lat/lon: lat_deg = lat_1e7*1e-7 + latHp_1e9*1e-9
         track = hp.select(
             [
@@ -251,22 +262,29 @@ def _load_all_tracks(cfg: dict) -> pl.DataFrame:
     files = sorted(track_dir.glob("*.track.parquet"))
     if not files:
         return pl.DataFrame()
-    parts = [read_parquet(f) for f in files]
-    return pl.concat(parts, how="vertical").sort("t_ns")
+    # Skip empty per-day frames (a day with no valid fixes writes a
+    # schemaless empty parquet, which would break the vertical concat).
+    parts = [p for p in (read_parquet(f) for f in files) if not p.is_empty()]
+    if not parts:
+        return pl.DataFrame()
+    # diagonal_relaxed (not vertical): tolerate minor per-day schema drift --
+    # a column a single day's parser happened to write as a different int
+    # width would otherwise abort the whole 200-day concat.
+    return pl.concat(parts, how="diagonal_relaxed").sort("t_ns")
 
 
 def _detect_crossings(track: pl.DataFrame) -> list[dict[str, Any]]:
     """Equator and Antarctic-Circle crossings (lat sign changes / threshold).
 
-    Restricted to the cruise window (2025-01-01 to 2027-01-01); rows
+    Restricted to a wide sanity window (2017-2030); rows
     with bogus ``t_ns`` outside that window (pre-fix-lock cached
     coordinates that slipped through the trajectory filter) produced
     nonsensical "crossings" — those are now dropped.
     """
     if track.is_empty():
         return []
-    T_MIN = 1_735_689_600 * 1_000_000_000
-    T_MAX = 1_798_761_600 * 1_000_000_000
+    T_MIN = 1_483_228_800 * 1_000_000_000   # 2017-01-01 UTC — wide sanity bound
+    T_MAX = 1_893_456_000 * 1_000_000_000   # 2030-01-01 UTC — wide sanity bound
     track = track.filter(
         (pl.col("t_ns") > T_MIN) & (pl.col("t_ns") < T_MAX)
     ).sort("t_ns")
@@ -391,7 +409,7 @@ def aggregate_track(cfg: dict | None = None) -> dict[str, Path]:
             "type": "Feature",
             "geometry": {"type": "MultiLineString", "coordinates": segments},
             "properties": {
-                "name": "Antarctica 2025/26 cruise",
+                "name": "Antarctica ship-borne GNSS cruise",
                 "n_segments": len(segments),
                 "n_points": sum(len(s) for s in segments),
                 "first_t": np.datetime64(int(track["t_ns"].min()), "ns").astype(str),
@@ -421,7 +439,7 @@ def aggregate_track(cfg: dict | None = None) -> dict[str, Path]:
                 },
                 coords={"time": t_dt},
                 attrs={
-                    "title": "Antarctica 2025/26 ship-borne GNSS cruise track",
+                    "title": "Antarctica ship-borne GNSS cruise track",
                     "instrument": "u-blox ZED-F9P-15B",
                     "decimation_hz": 1.0,
                     "source": "NAV-HPPOSLLH (or NAV-PVT fallback)",

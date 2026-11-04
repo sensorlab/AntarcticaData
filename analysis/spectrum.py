@@ -5,8 +5,9 @@ and produces:
 
 * ``derived/spectrum/<day>.spectrogram.npz`` — 1-min averaged spectrogram
   per RF block, with frequency axis in MHz.
-* ``derived/spectrum/<day>.rfi.parquet`` — detected RFI events (per-bin
-  running median + 5·MAD threshold over 1-h windows).
+* ``derived/spectrum/<day>.rfi.parquet`` — RF-spectrum excursions: samples of
+  the 1-min averaged spectrum whose amplitude exceeds the daily median of
+  their frequency bin by more than 5 MAD (median and MAD over the UTC day).
 * Cross-day aggregate: ``derived/spectrum/spectrogram_full.npz``.
 
 The MON-SPAN data is encoded as 8-bit "amplitude" — relative scale, not
@@ -173,11 +174,26 @@ def write_day_spectrum(day: str, cfg: dict | None = None) -> Path | None:
     cfg = cfg or load_config()
     out_dir = derived_dir(cfg) / "spectrum"
     out_dir.mkdir(parents=True, exist_ok=True)
+    np_path = out_dir / f"{day}.spectrogram.npz"
     res = compute_day_spectrogram(day, cfg=cfg)
     if res is None:
-        log.warning("No spectrum data for %s", day)
-        return None
-    np_path = out_dir / f"{day}.spectrogram.npz"
+        # Still emit the declared Snakemake output — an empty sentinel — so the
+        # rule doesn't fail with MissingOutputException on days that carry no
+        # MON-SPAN (e.g. the 2025 'dan_' files where a given day logged no
+        # spectrum, or a truncated capture). Downstream consumers detect the
+        # empty flag / zero-length spectrogram and skip the day. This matches
+        # the parser's empty-Parquet convention (ubx/writers.py).
+        log.warning("No spectrum data for %s — writing empty sentinel npz", day)
+        np.savez_compressed(
+            np_path,
+            spectrogram=np.zeros((0, 2, 256), dtype=np.float32),
+            t_s=np.zeros((0,), dtype=np.float64),
+            freq_mhz_l1=np.zeros((0,), dtype=np.float64),
+            freq_mhz_l5=np.zeros((0,), dtype=np.float64),
+            pga_db_mean=np.zeros((2,), dtype=np.float32),
+            empty=np.array(True),
+        )
+        return np_path
     np.savez_compressed(
         np_path,
         spectrogram=res["spectrogram"],

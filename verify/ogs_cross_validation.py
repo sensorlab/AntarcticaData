@@ -10,17 +10,21 @@ sanity check on the published cruise track.
 For each OGS timestamp we take the *nearest* F9P sample (at 1 Hz the gap is
 always <=0.5 s) and compute the haversine horizontal residual. Output:
 
-    work/tables/T_ogs_vs_f9p.csv          — per-fix residuals (one row per OGS fix)
-    work/tables/T_ogs_vs_f9p_summary.csv  — overall and per-campaign rollup
-    work/figures/output/fig_ogs_vs_f9p.pdf — residual time series + CDF
+    work/tables/T_ogs_vs_f9p.csv            — per-fix residuals (one row per OGS fix)
+    work/tables/T_ogs_vs_f9p_daily.csv      — per-day percentiles
+    work/tables/T_ogs_vs_f9p_summary.csv    — whole-cruise rollup
+    work/tables/T_ogs_vs_f9p_campaigns.csv  — along/cross-track decomposition and
+                                              stationary statistics per OGS campaign
+    work/tables/T_ogs_vs_f9p_stationary.csv — stationary residuals per port and month
+    work/figures/output/fig_ogs_vs_f9p.pdf  — residual time series + CDF
 
 Cached OGS JSON lives in ``work/derived/ogs_tracks/`` so re-runs do not
 re-hit the OGS server. Use ``--refetch`` to force a refresh.
 
-Cruise coverage (as of 2026-05-17): OGS tracks 7+8 cover 2025-10-03 → 2026-02-28
-(~149 / 216 cruise days). The first week (Sep 26 → Oct 2) and the return leg
-(Mar 1 → Apr 29) are not yet published as OGS campaigns; this script reports
-on whatever overlap is available.
+Cruise coverage (as of 2026-10-02): OGS tracks 7+8 cover 2025-10-03 → 2026-02-28
+and track 9 ("Transfer NZ-ITA 2026") covers 2026-03-01 → 2026-04-20. The first
+week (Sep 26 → Oct 2) and the final days (Apr 21 → 29) are not covered; this
+script reports on whatever overlap is available.
 """
 
 from __future__ import annotations
@@ -48,7 +52,8 @@ log = logging.getLogger(__name__)
 
 OGS_CAMPAIGNS: dict[int, str] = {
     7: "Transfer ITA-NZ 2025",
-    8: "41th PNRA Antarctic Campaign",
+    8: "41st PNRA Antarctic Campaign",
+    9: "Transfer NZ-ITA 2026",
 }
 OGS_TRACK_URL = "https://laurabassi.ogs.it/json/lb_track{cid}.json"
 MATCH_TOL_S = 60.0  # reject pairs where the nearest F9P sample is > this away
@@ -179,6 +184,110 @@ def _speed_decomposition(matched: pl.DataFrame) -> dict[str, float]:
     }
 
 
+def _along_cross_decomposition(matched: pl.DataFrame) -> dict[str, float]:
+    """Split the F9P - OGS residual vector into along- and cross-track parts.
+
+    The horizontal *magnitude* mixes a fixed antenna offset with a
+    speed-proportional timing lag, so a fit of |residual| against speed does
+    not isolate either. Projecting the residual onto the course direction
+    (from the centred difference of consecutive OGS fixes) does: a timing
+    lag tau adds tau * v along-track only, while a fixed offset in the ship
+    frame shows up in both components. Fits use moving fixes on straight
+    legs (course change < MAX_TURN_DEG between neighbouring fixes).
+    """
+    MAX_TURN_DEG = 10.0
+    m = matched.sort("t_ns")
+    if m.height < 100 or "speed_m_s" not in m.columns:
+        return {}
+    lat0 = np.deg2rad(m["lat_ogs"].to_numpy())
+    lon0 = np.deg2rad(m["lon_ogs"].to_numpy())
+    R = 6371008.8
+    dn = (np.deg2rad(m["lat_f9p"].to_numpy()) - lat0) * R
+    dlon = (np.deg2rad(m["lon_f9p"].to_numpy()) - lon0 + np.pi) % (2 * np.pi) - np.pi
+    de = dlon * R * np.cos(lat0)
+    # Course from neighbouring OGS fixes (local tangent plane at each fix). The
+    # east velocity is R cos(lat) dlon/dt; differentiating lon * R * cos(lat)
+    # instead would add a term proportional to the longitude itself whenever
+    # the latitude changes.
+    t = m["t_ns"].to_numpy() / 1e9
+    vn = R * np.gradient(lat0, t)
+    ve = R * np.cos(lat0) * np.gradient(np.unwrap(lon0), t)
+    course = np.arctan2(ve, vn)
+    turn = np.abs(np.rad2deg(np.angle(np.exp(1j * np.gradient(np.unwrap(course))))))
+    ue, un = np.sin(course), np.cos(course)
+    along = de * ue + dn * un
+    cross = de * un - dn * ue
+    sp = m["speed_m_s"].to_numpy()
+    ok = np.isfinite(sp) & (sp > 1.0) & (sp < 20.0) & (turn < MAX_TURN_DEG)
+    if ok.sum() < 100:
+        return {}
+    slope, b_along = (float(x) for x in np.polyfit(sp[ok], along[ok], 1))
+    b_cross = float(np.median(cross[ok]))
+    resid = along[ok] - (slope * sp[ok] + b_along)
+    # A pure time-tag lag leaves the cross-track component independent of speed.
+    cross_slope = float(np.polyfit(sp[ok], cross[ok], 1)[0])
+    return {
+        "lag_s_along_track": slope,
+        "offset_along_m": b_along,
+        "offset_cross_m": b_cross,
+        "offset_horiz_m": float(np.hypot(b_along, b_cross)),
+        "along_fit_resid_p50_abs_m": float(np.median(np.abs(resid))),
+        "along_fit_resid_iqr_m": float(np.subtract(*np.percentile(resid, [75, 25]))),
+        "cross_iqr_m": float(np.subtract(*np.percentile(cross[ok], [75, 25]))),
+        "cross_speed_slope_s": cross_slope,
+        "speed_median_m_s": float(np.median(sp[ok])),
+        "n_straight_moving": int(ok.sum()),
+    }
+
+
+def _per_campaign(matched: pl.DataFrame) -> pl.DataFrame:
+    """Along/cross-track decomposition and stationary residuals per campaign.
+
+    The OGS time-tag lag and any offset of the OGS reference point can change
+    between campaigns, so the pooled fit mixes different regimes.
+    """
+    rows = []
+    for cid in sorted(matched["campaign_id"].unique().to_list()):
+        sub = matched.filter(pl.col("campaign_id") == cid).sort("t_ns")
+        row: dict[str, float | int] = {"campaign_id": int(cid), "n_fixes": sub.height}
+        row.update(_along_cross_decomposition(sub))
+        if "speed_m_s" in sub.columns:
+            st = sub.filter(pl.col("speed_m_s").is_finite() & (pl.col("speed_m_s") < 0.2))
+            h = st["horiz_m"].to_numpy()
+            row["n_stationary"] = int(h.size)
+            row["stationary_p50_m"] = float(np.median(h)) if h.size else float("nan")
+            row["stationary_p90_m"] = float(np.quantile(h, 0.9)) if h.size else float("nan")
+        rows.append(row)
+    return pl.DataFrame(rows)
+
+
+def _stationary_by_port_month(matched: pl.DataFrame) -> pl.DataFrame:
+    """Stationary residuals (speed < 0.2 m/s) per port and calendar month."""
+    from verify.igs_compare import EXAMPLE_REFS
+
+    if "speed_m_s" not in matched.columns:
+        return pl.DataFrame()
+    st = matched.filter(pl.col("speed_m_s").is_finite() & (pl.col("speed_m_s") < 0.2))
+    if st.is_empty():
+        return pl.DataFrame()
+    lat = st["lat_f9p"].to_numpy()
+    lon = st["lon_f9p"].to_numpy()
+    port = np.full(st.height, "other", dtype=object)
+    for ref in EXAMPLE_REFS:
+        d = haversine_km(lat, lon, np.full_like(lat, ref["lat"]), np.full_like(lon, ref["lon"]))
+        port[d <= float(ref["radius_km"])] = ref["name"]
+    month = [datetime.fromtimestamp(x / 1e9, tz=timezone.utc).strftime("%Y-%m")
+             for x in st["t_ns"].to_list()]
+    st = st.with_columns(pl.Series("port", port.tolist()), pl.Series("month", month))
+    return (
+        st.group_by(["port", "month"])
+          .agg(pl.len().alias("n"),
+               pl.col("horiz_m").median().alias("p50_m"),
+               pl.col("horiz_m").quantile(0.9).alias("p90_m"))
+          .sort(["port", "month"])
+    )
+
+
 def _per_day_summary(matched: pl.DataFrame) -> pl.DataFrame:
     return matched.with_columns(
         (pl.col("t_ns") // 86_400_000_000_000).alias("_day_bin")
@@ -297,8 +406,8 @@ def _build_figure(matched: pl.DataFrame, decomp: dict[str, float],
 @click.command()
 @click.option("--refetch", is_flag=True, default=False,
               help="Force re-download of OGS track JSONs (default: use cache)")
-@click.option("--campaigns", default="7,8",
-              help="Comma-separated OGS campaign IDs to validate against (default: 7,8)")
+@click.option("--campaigns", default="7,8,9",
+              help="Comma-separated OGS campaign IDs to validate against (default: 7,8,9)")
 def main(refetch: bool, campaigns: str) -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -361,6 +470,7 @@ def main(refetch: bool, campaigns: str) -> None:
 
     h = matched["horiz_m"].to_numpy()
     decomp = _speed_decomposition(matched)
+    decomp.update(_along_cross_decomposition(matched))
     metrics: list[str] = ["n_matched", "p50_m", "p90_m", "p95_m", "p99_m", "max_m", "mean_m"]
     values: list[float] = [
         float(len(h)),
@@ -369,7 +479,10 @@ def main(refetch: bool, campaigns: str) -> None:
         float(np.max(h)), float(np.mean(h)),
     ]
     for k in ("p50_dwell_m", "n_dwell", "n_moving", "pearson_r",
-              "lag_s_estimate", "static_offset_m_estimate"):
+              "lag_s_estimate", "static_offset_m_estimate",
+              "lag_s_along_track", "offset_along_m", "offset_cross_m", "offset_horiz_m",
+              "along_fit_resid_p50_abs_m", "along_fit_resid_iqr_m", "cross_iqr_m",
+              "cross_speed_slope_s", "speed_median_m_s", "n_straight_moving"):
         if k in decomp:
             metrics.append(k)
             values.append(float(decomp[k]))
@@ -378,9 +491,17 @@ def main(refetch: bool, campaigns: str) -> None:
     summary.write_csv(summary_path)
     log.info("wrote %s", summary_path)
 
+    campaigns = _per_campaign(matched)
+    campaigns.write_csv(tables_dir(cfg) / "T_ogs_vs_f9p_campaigns.csv")
+    stationary = _stationary_by_port_month(matched)
+    if not stationary.is_empty():
+        stationary.write_csv(tables_dir(cfg) / "T_ogs_vs_f9p_stationary.csv")
+
     print("\n--- F9P vs OGS horizontal residual ---")
-    with pl.Config(tbl_rows=30, tbl_width_chars=120):
+    with pl.Config(tbl_rows=40, tbl_cols=20, tbl_width_chars=200, float_precision=2):
         print(summary)
+        print(campaigns)
+        print(stationary)
         print(daily)
 
     fig_path = figures_dir(cfg) / "output" / "fig_ogs_vs_f9p.pdf"

@@ -61,8 +61,11 @@ from analysis._common import (
 
 log = logging.getLogger(__name__)
 
-T_MIN_NS = 1_735_689_600 * 1_000_000_000   # 2025-01-01 UTC — pre-cruise
-T_MAX_NS = 1_798_761_600 * 1_000_000_000   # 2027-01-01 UTC — post-cruise
+# Wide sanity bound (2017-2030) to reject 1970 / GPS-week-rollover t_ns; spans
+# both the 2025 (from Oct 2024) and 2026 cruises. A tight per-cruise window
+# here silently dropped the 2025 cruise's Oct-Dec 2024 first half.
+T_MIN_NS = 1_483_228_800 * 1_000_000_000   # 2017-01-01 UTC
+T_MAX_NS = 1_893_456_000 * 1_000_000_000   # 2030-01-01 UTC
 SPEED_OUTLIER_KN = 100.0
 # Hybrid jamming-flag thresholds — three-layer:
 #
@@ -81,11 +84,14 @@ SPEED_OUTLIER_KN = 100.0
 HIGH_JAM_THRESHOLD_L1_ABS = 60
 HIGH_JAM_THRESHOLD_L2L5_ABS = 130
 JAM_RELATIVE_N_MAD = 5
-# Above the L1 baseline 17–30 but below the absolute floor 60. Any
-# jamInd above this on the L1 block is the lowest value we still call
-# "interesting" on the quietest day.
+# Above the typical daily maxima of the L1 block on days without strong RFI
+# (19–31 on the days checked in the 2025/26 cruise) but below the absolute
+# floor 60. Any jamInd above this on the L1 block is the lowest value we
+# still call "interesting" on the quietest day.
 PER_DAY_MIN_L1 = 40
-# Above the L2/L5 baseline 70–100 but below the absolute floor 130.
+# Above the daily means (6.6–62.3 in the 2025/26 cruise) and the daily maxima
+# of most days (82–119 on the 64 Antarctic days) of the L2/L5 block, below
+# the absolute floor 130.
 PER_DAY_MIN_L2L5 = 110
 HACC_TIGHT_M = 5.0
 

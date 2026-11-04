@@ -47,21 +47,13 @@ from analysis._common import (
 log = logging.getLogger(__name__)
 
 
-# Ten well-spread days covering the cruise legs visible in the paper
-# (Trieste departure dock, Mediterranean / Atlantic transit out, Lyttelton
-# berth, Southern-Ocean approach, Antarctic dwell × 2, polar departure,
-# Atlantic return transit × 2, Mediterranean return approach).
+# Three representative days spanning the cruise's operating modes:
+# a stationary fixed-receiver baseline, a polar-anchorage high-variability
+# case, and an open-ocean transit.
 DEFAULT_DAYS: tuple[str, ...] = (
-    "20250930",  # Trieste dock, pre-departure baseline (31 SVs visible)
-    "20251020",  # Mediterranean -> Atlantic transit
-    "20251115",  # Lyttelton (NZ) berth (mid-November)
-    "20251210",  # Southern-Ocean approach to Antarctica
-    "20260101",  # Antarctic dwell (New Year)
-    "20260127",  # Mario Zucchelli anchorage
-    "20260215",  # Polar departure, re-transit Southern Ocean
-    "20260315",  # Atlantic return-leg (mid-March)
-    "20260415",  # Mid-Atlantic return (April)
-    "20260425",  # Mediterranean return, approaching Trieste
+    "20250930",  # Trieste dock, pre-departure baseline (ship stationary)
+    "20260127",  # Mario Zucchelli polar anchorage
+    "20260415",  # western Mediterranean, return transit
 )
 
 
@@ -88,7 +80,10 @@ def _day_to_doy(day: str) -> tuple[int, int, int]:
 
 
 def fetch_ionex(day: str, cache_dir: Path) -> Path | None:
-    """Download IGS GIM IONEX for one day; cache locally; return path or None."""
+    """Download the CODE GIM (IONEX) for one day; cache locally; return path or None.
+
+    The cache keeps the legacy file name igsgDDD0.YYi, but the content is the CODE map.
+    """
     yyyy, doy, yy = _day_to_doy(day)
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / f"igsg{doy:03d}0.{yy:02d}i"
@@ -382,18 +377,18 @@ def build_figure(results: list[dict], out_path: Path) -> None:
     for i, r in enumerate(results):
         ax = axes[i]
         ax.plot(r["times"], r["our_vtec_corrected"], "-o", ms=3, lw=0.9,
-                color="#1f77b4", label="this dataset (DCB-corrected)")
+                color="#1f77b4", label="this dataset, daily offset removed")
         ax.plot(r["times"], r["gim_vtec"], "-s", ms=3, lw=0.9,
-                color="#d62728", label="IGS GIM")
+                color="#d62728", label="CODE GIM")
         ax.set_ylabel("vTEC (TECU)")
         ax.set_title(f"{r['day']}  (n={r['n_bins']} hourly bins, "
-                     f"rms={r['rms_after_offset_TECU']:.1f} TECU, "
+                     f"RMS after offset removal {r['rms_after_offset_TECU']:.1f} TECU, "
                      f"ρ={r['spearman_rho']:+.2f})", fontsize=9)
         ax.legend(loc="best", fontsize=8)
         ax.grid(alpha=0.3)
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
     axes[-1].set_xlabel("UTC time")
-    fig.suptitle("Vertical-TEC validation against IGS GIM", fontsize=11)
+    fig.suptitle("Vertical TEC of the dataset compared with the CODE GIM", fontsize=11)
     fig.savefig(out_path, dpi=150)
     log.info("Wrote %s", out_path)
 
@@ -423,11 +418,11 @@ def build_summary_figure(results: list[dict], out_path: Path) -> None:
     axes[0].legend(loc="lower right", fontsize=8)
 
     axes[1].bar(days, rms, width=8, color="#d62728", edgecolor="k", lw=0.4)
-    axes[1].set_ylabel("Post-DCB RMS\n(TECU)")
+    axes[1].set_ylabel("RMS after offset\nremoval (TECU)")
     axes[1].grid(alpha=0.3, axis="y")
 
     axes[2].bar(days, off, width=8, color="#9467bd", edgecolor="k", lw=0.4)
-    axes[2].set_ylabel("Per-day DCB\noffset (TECU)")
+    axes[2].set_ylabel("Daily offset\n(TECU)")
     axes[2].xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
     axes[2].xaxis.set_major_locator(mdates.AutoDateLocator(minticks=5, maxticks=10))
     axes[2].set_xlabel("UTC date")
@@ -435,7 +430,7 @@ def build_summary_figure(results: list[dict], out_path: Path) -> None:
     fig.autofmt_xdate(rotation=30, ha="right")
 
     fig.suptitle(
-        f"Vertical-TEC cross-validation against IGS GIM "
+        f"Vertical TEC of the dataset compared with the CODE GIM "
         f"(N={len(results)} days spanning the cruise)",
         fontsize=11,
     )

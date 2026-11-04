@@ -13,16 +13,30 @@
 # RINEX (Stage 5) and PPP (Stage 4) are defined but not part of `default`;
 # invoke them with `snakemake --cores 32 rinex_all` and `ppp_all`.
 
+import os
 import re
 from pathlib import Path
 
 import yaml
 
 # ---- Config -----------------------------------------------------------------
+# Dataset selected by ANTARCTICA_PIPELINE (default 'pipeline'), which names
+# config/<name>.yaml, so the same DAG can run another dataset with separate paths.
+# Subprocesses inherit the env var, so parse/analysis stages resolve the same
+# config. Snakemake state is per-config; use a dataset-specific work dir.
 
-CFG = yaml.safe_load(Path("config/pipeline.yaml").read_text())
+_CFG_NAME = os.environ.get("ANTARCTICA_PIPELINE", "pipeline")
+CFG = yaml.safe_load(Path(f"config/{_CFG_NAME}.yaml").read_text())
 
 UBX_DIR = Path(CFG["paths"]["ubx_dir"]).resolve()
+# Filename template with a {day} placeholder for YYYYMMDD. Default "{day}.ubx";
+# a dataset can override, e.g. "dan_{day}.ubx" for prefixed files. The glob and
+# date-extraction regex are derived from it, and the parse/rinex rules use it
+# directly as the input path ({day} doubles as the Snakemake wildcard).
+UBX_PATTERN = CFG["paths"].get("ubx_pattern", "{day}.ubx")
+_UBX_PRE, _UBX_POST = UBX_PATTERN.split("{day}")
+UBX_GLOB = _UBX_PRE + "*" + _UBX_POST
+_UBX_RE = re.compile(re.escape(_UBX_PRE) + r"(20\d{6})" + re.escape(_UBX_POST) + "$")
 STAGING = Path(CFG["paths"]["staging"]).resolve()
 DERIVED = Path(CFG["paths"]["derived"]).resolve()
 FIGURES_DIR = Path(CFG["paths"]["figures"]).resolve()
@@ -33,11 +47,18 @@ LOGS = Path(CFG["paths"]["logs"]).resolve()
 PER_DAY_PARQUET = ["nav_pvt", "nav_hpposllh", "nav_sat", "rxm_rawx",
                    "rxm_sfrbx", "rxm_measx", "mon_rf", "mon_sys"]
 
+# Some cruises log a leaner message set without RXM-RAWX (no carrier phase,
+# no dual-band C/N0), so the RAWX-dependent products -- multipath, TEC,
+# scintillation, RINEX/PPP, and the fig05 multipath figure -- are physically
+# impossible. Gate them out of the default targets via `has_rawx: false` in
+# the dataset config.
+HAS_RAWX = bool(CFG.get("has_rawx", True))
+
 
 def _discover_days():
     days = []
-    for p in sorted(UBX_DIR.glob("*.ubx")):
-        m = re.match(r"(20\d{6})\.ubx$", p.name)
+    for p in sorted(UBX_DIR.glob(UBX_GLOB)):
+        m = _UBX_RE.match(p.name)
         if m:
             days.append(m.group(1))
     return days
@@ -45,7 +66,7 @@ def _discover_days():
 
 DAYS = _discover_days()
 if not DAYS:
-    raise WorkflowError(f"No YYYYMMDD.ubx files in {UBX_DIR}")
+    raise WorkflowError(f"No files matching {UBX_GLOB} in {UBX_DIR}")
 
 
 # ---- Targets ----------------------------------------------------------------
@@ -56,7 +77,7 @@ rule all:
         expand(STAGING / "{day}/nav_pvt.parquet", day=DAYS),
         expand(DERIVED / "qc/{day}.qc.json", day=DAYS),
         expand(DERIVED / "track/{day}.track.parquet", day=DAYS),
-        expand(DERIVED / "multipath/{day}.multipath.parquet", day=DAYS),
+        (expand(DERIVED / "multipath/{day}.multipath.parquet", day=DAYS) if HAS_RAWX else []),
         expand(DERIVED / "spectrum/{day}.spectrogram.npz", day=DAYS),
         TABLES_DIR / "T1_receiver.csv",
         TABLES_DIR / "T2_signal_coverage.csv",
@@ -78,7 +99,7 @@ rule analysis_all:
     input:
         expand(DERIVED / "qc/{day}.qc.json", day=DAYS),
         expand(DERIVED / "track/{day}.track.parquet", day=DAYS),
-        expand(DERIVED / "multipath/{day}.multipath.parquet", day=DAYS),
+        (expand(DERIVED / "multipath/{day}.multipath.parquet", day=DAYS) if HAS_RAWX else []),
         expand(DERIVED / "spectrum/{day}.spectrogram.npz", day=DAYS),
 
 
@@ -86,7 +107,7 @@ rule figures:
     """Render all figXX_*.pdf."""
     input:
         FIGURES_DIR / "output/fig01_cruise_track_map.pdf",
-        FIGURES_DIR / "output/fig05_multipath_M1M2_vs_elev_lat.pdf",
+        (FIGURES_DIR / "output/fig05_multipath_M1M2_vs_elev_lat.pdf" if HAS_RAWX else []),
         FIGURES_DIR / "output/fig11_daily_rf_waterfall.pdf",
         FIGURES_DIR / "output/fig12_temp_agc_timeseries.pdf",
 
@@ -97,7 +118,7 @@ rule figures:
 rule parse:
     """One .ubx -> 8 Parquet + 1 Zarr group."""
     input:
-        UBX_DIR / "{day}.ubx"
+        UBX_DIR / UBX_PATTERN
     output:
         nav_pvt=STAGING / "{day}/nav_pvt.parquet",
         nav_hpposllh=STAGING / "{day}/nav_hpposllh.parquet",
@@ -106,6 +127,13 @@ rule parse:
         rxm_measx=STAGING / "{day}/rxm_measx.parquet",
         mon_rf=STAGING / "{day}/mon_rf.parquet",
         mon_sys=STAGING / "{day}/mon_sys.parquet",
+        # Track the MON-SPAN Zarr via its per-day sidecar (written by
+        # ZarrSpanSink.close). Without this, the Zarr is an untracked
+        # side-effect: deleting mon_span.zarr does NOT force a re-parse
+        # (the Parquets still satisfy the rule), so the spectrum stage
+        # silently reads an empty store. Declaring the sidecar makes a
+        # wiped/missing Zarr re-trigger parse like any other output.
+        span_meta=SPECTRUM_ZARR / "{day}.span.meta.json",
     log:
         LOGS / "parse/{day}.log"
     threads: 1
@@ -310,7 +338,7 @@ rule rinex_all:
 
 rule rinex_convbin:
     input:
-        UBX_DIR / "{day}.ubx"
+        UBX_DIR / UBX_PATTERN
     output:
         DERIVED / "rinex/{day}/obs.rnx",
         DERIVED / "rinex/{day}/nav.rnx",

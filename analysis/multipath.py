@@ -8,11 +8,12 @@ non-GPS) carrier-phase + pseudorange. The combination
 
 where ``α = (f1/f2)²``, removes the ionospheric and clock components and
 leaves ``2 · multipath + 2 · ambiguities`` per arc. We arc-segment on
-``(trkStat & 0x02) == 0`` (loss of carrier-phase lock), subtract per-arc
-mean to remove the ambiguity term, and report the residual as multipath.
+time gaps, lock-time resets and geometry-free phase jumps, drop arcs
+shorter than 5 min, subtract the per-arc mean to remove the ambiguity
+term, and report the residual as multipath.
 
 Output: ``derived/multipath/<day>.multipath.parquet`` with columns
-``t_ns, gnssId, svId, sigPair, M1, M2, elev``.
+``t_ns, gnssId, svId, sig1, sig2, M1, M2, elev, azim, cno1, cno2, _arc``.
 """
 
 from __future__ import annotations
@@ -58,6 +59,12 @@ DUAL_FREQ_SIG_PAIRS: dict[int, tuple[int, int]] = {
 # Backwards-compatible alias (used by analysis.tec).
 L1L2_SIG_PAIRS = DUAL_FREQ_SIG_PAIRS
 
+# Arc segmentation thresholds (see compute_day_multipath).
+MP_GAP_NS = int(2.5e9)       # time gap that ends an arc (2 Hz nominal)
+MP_GF_SLIP_M = 0.05          # |Δ(Φ1λ1 − Φ2λ2)| between epochs flagging a cycle slip
+MP_M1_JUMP_M = 10.0          # |ΔM1| code-outlier break
+MP_MIN_ARC_EPOCHS = 600      # 5 min at 2 Hz; shorter arcs are discarded
+
 
 def compute_day_multipath(day: str, cfg: dict | None = None) -> pl.DataFrame:
     cfg = cfg or load_config()
@@ -83,17 +90,18 @@ def compute_day_multipath(day: str, cfg: dict | None = None) -> pl.DataFrame:
         if sub.is_empty():
             continue
         l1 = sub.filter(pl.col("sigId") == sig1).select(
-            ["t_ns", "svId", "freqId", "prMes", "cpMes", "cno", "elev", "azim"]
+            ["t_ns", "svId", "freqId", "prMes", "cpMes", "cno", "locktime_ms", "elev", "azim"]
         ).rename(
             {
                 "prMes": "P1",
                 "cpMes": "Phi1",
                 "cno": "cno1",
+                "locktime_ms": "lt1",
             }
         )
         l2 = sub.filter(pl.col("sigId") == sig2).select(
-            ["t_ns", "svId", "freqId", "prMes", "cpMes", "cno"]
-        ).rename({"prMes": "P2", "cpMes": "Phi2", "cno": "cno2"})
+            ["t_ns", "svId", "freqId", "prMes", "cpMes", "cno", "locktime_ms"]
+        ).rename({"prMes": "P2", "cpMes": "Phi2", "cno": "cno2", "locktime_ms": "lt2"})
 
         joined = l1.join(l2, on=["t_ns", "svId", "freqId"], how="inner")
         if joined.is_empty():
@@ -132,10 +140,11 @@ def compute_day_multipath(day: str, cfg: dict | None = None) -> pl.DataFrame:
             M1 = P1 - (1.0 + 2.0 / denom) * Phi1 + (2.0 / denom) * Phi2
             M2 = P2 - (2.0 * alpha / denom) * Phi1 + (2.0 * alpha / denom - 1.0) * Phi2
 
-        # Remove per-arc mean (svId × t_ns segments; arc breaks not detected
-        # here — for the analysis paper we just use a single per-day mean per
-        # SV which is OK for the M1/M2 RMS statistic; the proper arc-mean
-        # removal happens in the figure-time aggregation).
+        # Per-arc bias removal. Arcs are segmented per (gnssId, svId) on time
+        # gaps and cycle-slip jumps (see the GAP_NS / SLIP_M logic below), and
+        # the per-arc mean of M1/M2 is subtracted to remove the carrier-phase
+        # ambiguity term, leaving the multipath residual. This is the per-arc
+        # removal reported in the paper.
         df = pl.DataFrame(
             {
                 "t_ns": joined["t_ns"],
@@ -146,31 +155,42 @@ def compute_day_multipath(day: str, cfg: dict | None = None) -> pl.DataFrame:
                 "M1": M1,
                 "M2": M2,
                 "elev": joined["elev"],
+                "azim": joined["azim"],
                 "cno1": joined["cno1"],
                 "cno2": joined["cno2"],
+                "_GF": Phi1 - Phi2,
+                "_lt1": joined["lt1"],
+                "_lt2": joined["lt2"],
             }
         ).sort(["gnssId", "svId", "t_ns"])
-        # Arc segmentation: a new arc starts when either (a) the time gap
-        # to the previous epoch of the same SV exceeds GAP_S, or (b) the
-        # carrier-phase ambiguity has plausibly slipped — we proxy this
-        # via a |M1 - prev_M1| jump above SLIP_M (any cycle-slip on either
-        # band shifts M1 by ≥ λ × N which is ≥ 0.19 m). 0.1 m catches
-        # single-cycle L1 slips that 0.5 m used to leak through; the
-        # leakage produced multi-cycle outliers reaching 1e7 m in the
-        # per-elev std aggregation of fig05.
-        GAP_NS = int(2.5e9)        # 2.5 s gap — generous at 2 Hz nominal
-        SLIP_M = 0.1               # |ΔM1| > 0.1 m flags a slip-bounded arc break
+        # Arc segmentation on carrier-phase continuity only. A new arc
+        # starts on (a) a time gap > GAP_NS, (b) a lock-time reset on either
+        # band (receiver-declared loss of lock), (c) a geometry-free phase
+        # jump > GF_SLIP_M between consecutive epochs (cycle slip on either
+        # band; the ionospheric GF rate is a few mm per 0.5 s even under
+        # strong activity), or (d) a code-dominated |ΔM1| > M1_JUMP_M
+        # outlier. Code noise must NOT be used as a slip detector: an earlier
+        # |ΔM1| > 0.1 m rule fired on nearly every 2 Hz epoch, producing
+        # one-epoch arcs whose per-arc mean removal zeroed M1 and biased the
+        # RMS low by an order of magnitude. Arcs shorter than MIN_ARC_EPOCHS
+        # are dropped so the per-arc mean is a stable ambiguity estimate.
+        k = ["gnssId", "svId"]
         df = df.with_columns([
-            (pl.col("t_ns").diff().over(["gnssId", "svId"]).fill_null(0) > GAP_NS).alias("_gap_break"),
-            (pl.col("M1").diff().over(["gnssId", "svId"]).abs().fill_null(0) > SLIP_M).alias("_slip_break"),
+            (pl.col("t_ns").diff().over(k).fill_null(0) > MP_GAP_NS).alias("_gap_break"),
+            ((pl.col("_lt1").diff().over(k).fill_null(0) < 0)
+             | (pl.col("_lt2").diff().over(k).fill_null(0) < 0)).alias("_lock_break"),
+            (pl.col("_GF").diff().over(k).abs().fill_null(0) > MP_GF_SLIP_M).alias("_gf_break"),
+            (pl.col("M1").diff().over(k).abs().fill_null(0) > MP_M1_JUMP_M).alias("_m1_break"),
         ])
         df = df.with_columns(
-            (pl.col("_gap_break") | pl.col("_slip_break")).cum_sum().over(["gnssId", "svId"]).alias("_arc")
+            (pl.col("_gap_break") | pl.col("_lock_break") | pl.col("_gf_break") | pl.col("_m1_break"))
+            .cum_sum().over(k).alias("_arc")
         )
+        df = df.filter(pl.len().over(k + ["_arc"]) >= MP_MIN_ARC_EPOCHS)
         df = df.with_columns([
-            (pl.col("M1") - pl.col("M1").mean().over(["gnssId", "svId", "_arc"])).alias("M1"),
-            (pl.col("M2") - pl.col("M2").mean().over(["gnssId", "svId", "_arc"])).alias("M2"),
-        ]).drop(["_gap_break", "_slip_break"])
+            (pl.col("M1") - pl.col("M1").mean().over(k + ["_arc"])).alias("M1"),
+            (pl.col("M2") - pl.col("M2").mean().over(k + ["_arc"])).alias("M2"),
+        ]).drop(["_gap_break", "_lock_break", "_gf_break", "_m1_break", "_GF", "_lt1", "_lt2"])
         out_frames.append(df)
     if not out_frames:
         return pl.DataFrame()

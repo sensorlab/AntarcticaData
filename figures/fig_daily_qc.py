@@ -1,13 +1,16 @@
 """Daily quality-control time series (Männel et al. 2021, Fig. 3 equivalent).
 
-Three-panel stacked figure showing for every cruise day:
+Two-panel stacked figure showing for every cruise day:
 
-1. NAV-PVT epoch count (data completeness at 2 Hz nominal),
-2. Cycle-slip count + slip ratio (slips per 1000 carrier-phase obs),
-3. Code-multipath RMS (M1 and M2, in metres).
+1. Carrier-phase validity losses per 1000 carrier-phase observations (losses of
+   the carrier-phase-valid flag, a tracking-quality proxy for cycle slips),
+2. Code-multipath RMS (M1 and M2, in metres).
 
-All three are read from ``tables/T4_daily_stats.parquet`` (produced by
-``analysis.qc_summary``). The figure is sized for one ESSD column-pair
+Both are read from ``tables/T4_daily_stats.parquet`` (produced by
+``analysis.qc_summary``). The NAV-PVT epoch count is approximately
+constant across the cruise (the receiver held a continuous 2 Hz
+recording) and is not plotted; the per-day epoch totals are tabulated
+in ``T4_daily_stats``. The figure is sized for one ESSD column-pair
 (14 cm wide) and is the natural companion to the Bosser 2021 Table 3
 position-percentile table.
 
@@ -48,33 +51,23 @@ def build_figure(t4: pl.DataFrame, out_path: Path) -> None:
     apply_style()
     dates = np.array([_day_to_date(d) for d in t4["day"].to_list()])
     fig, axes = plt.subplots(
-        3, 1, figsize=(7, 6.5), sharex=True, constrained_layout=True
+        2, 1, figsize=(7, 4.6), sharex=True, constrained_layout=True
     )
 
-    # Panel 1 — epoch count
+    # Panel 1 — carrier-phase validity losses
     ax = axes[0]
-    ax.plot(dates, t4["n_epochs_pvt"].to_numpy(), "-", lw=0.9, color="#1f77b4")
-    expected = 86400 * 2
-    ax.axhline(expected, ls="--", color="grey", lw=0.6,
-               label=f"expected {expected:,}")
-    ax.set_ylabel("NAV-PVT\nepochs / day")
-    ax.legend(loc="lower right", fontsize=7)
-    ax.grid(alpha=0.3)
-
-    # Panel 2 — cycle slips
-    ax = axes[1]
     if "slip_ratio_per_1000" in t4.columns:
         y = t4["slip_ratio_per_1000"].to_numpy()
         ax.plot(dates, y, "-", lw=0.9, color="#d62728")
-        ax.set_ylabel("Cycle slips\nper 1000 obs")
+        ax.set_ylabel("Phase-validity losses\nper 1000 obs")
     else:
         y = t4["cycle_slip_count"].to_numpy()
         ax.plot(dates, y, "-", lw=0.9, color="#d62728")
-        ax.set_ylabel("Cycle slips\nper day")
+        ax.set_ylabel("Phase-validity losses\nper day")
     ax.grid(alpha=0.3)
 
-    # Panel 3 — multipath RMS (bottom panel: carries x-axis labels)
-    ax = axes[2]
+    # Panel 2 — multipath RMS (bottom panel: carries x-axis labels)
+    ax = axes[1]
     if "mp1_rms_m" in t4.columns and "mp2_rms_m" in t4.columns:
         ax.plot(dates, t4["mp1_rms_m"].to_numpy(), "-", lw=0.9,
                 color="#2ca02c", label="M1 (L1)")

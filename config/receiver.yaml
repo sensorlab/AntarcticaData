@@ -66,10 +66,10 @@ signals:
   GAL:
     "0": { rinex: "1C", freq_hz: 1575420000, lambda_m: 0.190293672798365 }   # E1 C
     "1": { rinex: "1B", freq_hz: 1575420000, lambda_m: 0.190293672798365 }   # E1 B
-    "3": { rinex: "5Q", freq_hz: 1176450000, lambda_m: 0.254828049 }         # E5a Q
-    "4": { rinex: "5I", freq_hz: 1176450000, lambda_m: 0.254828049 }         # E5a I  (tracked)
-    "5": { rinex: "7Q", freq_hz: 1207140000, lambda_m: 0.248349369 }         # E5b Q
-    "6": { rinex: "7I", freq_hz: 1207140000, lambda_m: 0.248349369 }         # E5b I
+    "3": { rinex: "5I", freq_hz: 1176450000, lambda_m: 0.254828049 }         # E5a I
+    "4": { rinex: "5Q", freq_hz: 1176450000, lambda_m: 0.254828049 }         # E5a Q  (tracked)
+    "5": { rinex: "7I", freq_hz: 1207140000, lambda_m: 0.248349369 }         # E5b I
+    "6": { rinex: "7Q", freq_hz: 1207140000, lambda_m: 0.248349369 }         # E5b Q
   GLO:
     # GLONASS uses FDMA: f1 = 1602.0 + n*0.5625 MHz, f2 = 1246.0 + n*0.4375 MHz
     # freq_hz here is the centre; per-channel offsets handled in code from freqId.
@@ -89,7 +89,8 @@ signals:
     "1": { rinex: "1S", freq_hz: 1575420000, lambda_m: 0.190293672798365 }
     "4": { rinex: "2L", freq_hz: 1227600000, lambda_m: 0.244210213424568 }
     "5": { rinex: "2M", freq_hz: 1227600000, lambda_m: 0.244210213424568 }
-    "7": { rinex: "5Q", freq_hz: 1176450000, lambda_m: 0.254828049 }
+    "8": { rinex: "5I", freq_hz: 1176450000, lambda_m: 0.254828049 }   # L5 I
+    "9": { rinex: "5Q", freq_hz: 1176450000, lambda_m: 0.254828049 }   # L5 Q  (tracked)
   NavIC:
     "0": { rinex: "5A", freq_hz: 1176450000, lambda_m: 0.254828049 }   # SPS L5
 

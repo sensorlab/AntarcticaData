@@ -1,12 +1,11 @@
 """Figure: cruise-wide RFI events.
 
-Two-panel figure for the paper:
+Single-panel map for the paper:
 
-* Top: cruise track on a south-polar map (re-uses the polar projection
-  from cruise_track_polar.py), with detected RFI events plotted as
-  markers sized/coloured by L1 jamInd peak.
-* Bottom: time-series of L1 jamInd peak vs day, with port-stop dwell
-  intervals shaded.
+* Cruise track on a Robinson world projection with detected RFI events
+  plotted as markers sized/coloured by L1 jamInd peak. The per-day
+  jamInd peak time-series is tabulated in main.tex Table 8 and is
+  therefore not duplicated in this figure.
 
 Inputs:
 * ``work/tables/T_rfi_events.csv`` — produced by
@@ -91,15 +90,14 @@ def render(out_path: Path, cfg: dict | None = None) -> Path:
         rfi.height, rfi_all.height, track.height,
     )
 
-    fig = plt.figure(figsize=(10, 8))
-    gs = fig.add_gridspec(2, 1, height_ratios=[2, 1], hspace=0.28)
+    fig = plt.figure(figsize=(10, 5.5))
 
-    # ---- Top: map (try cartopy → plain) ----
+    # ---- Map (try cartopy → plain) ----
     try:
         import cartopy.crs as ccrs
         import cartopy.feature as cfeature
 
-        ax_map = fig.add_subplot(gs[0], projection=ccrs.Robinson(central_longitude=120))
+        ax_map = fig.add_subplot(1, 1, 1, projection=ccrs.Robinson(central_longitude=220))
         try:
             ax_map.add_feature(cfeature.LAND, facecolor="0.93", edgecolor="0.55", linewidth=0.3)
             ax_map.add_feature(cfeature.OCEAN, facecolor="#F4F8FB")
@@ -107,10 +105,18 @@ def render(out_path: Path, cfg: dict | None = None) -> Path:
         except Exception:  # noqa: BLE001
             pass
         ax_map.gridlines(linewidth=0.2, color="0.7")
-        # Draw track
-        ax_map.plot(
+        # Track drawn as a scatter dot cloud (not a polyline) — same
+        # rationale as fig01: a polyline produces spurious straight
+        # streaks every time the track crosses the projection's wrap
+        # meridian or a data gap. ``rasterized=True`` collapses the
+        # tens of thousands of dots into a single embedded raster image
+        # inside the otherwise-vector PDF (drops file size from
+        # ~130 MB to <2 MB); event markers, coastlines, gridlines and
+        # text remain vector and crisp.
+        ax_map.scatter(
             track["lon"].to_numpy(), track["lat"].to_numpy(),
-            transform=ccrs.PlateCarree(), color="0.4", linewidth=0.6, alpha=0.6,
+            transform=ccrs.PlateCarree(), color="0.4", s=0.5, alpha=0.5,
+            edgecolors="none", zorder=3, rasterized=True,
         )
         # Draw events
         sizes = np.clip(rfi["L1_jam_max"].cast(pl.Float64).to_numpy() ** 1.4, 30, 600)
@@ -130,9 +136,10 @@ def render(out_path: Path, cfg: dict | None = None) -> Path:
         cb.set_label("L1 jamInd peak")
     except Exception as exc:  # noqa: BLE001
         log.warning("cartopy unavailable (%s); plain map", exc)
-        ax_map = fig.add_subplot(gs[0])
-        ax_map.plot(track["lon"], track["lat"], color="0.4",
-                    linewidth=0.6, alpha=0.6)
+        ax_map = fig.add_subplot(1, 1, 1)
+        ax_map.scatter(track["lon"], track["lat"], color="0.4",
+                       s=0.5, alpha=0.5, edgecolors="none", zorder=3,
+                       rasterized=True)
         sizes = np.clip(rfi["L1_jam_max"].cast(pl.Float64).to_numpy() ** 1.4, 30, 600)
         sc = ax_map.scatter(
             rfi["lon_med"].cast(pl.Float64).to_numpy(),
@@ -179,27 +186,8 @@ def render(out_path: Path, cfg: dict | None = None) -> Path:
                                   edgecolor="0.3", alpha=0.85),
                         zorder=10)
 
-    ax_map.set_title("L-band RFI events along the cruise (L1 jamInd peak per day)")
-
-    # ---- Bottom: time series ----
-    ax_ts = fig.add_subplot(gs[1])
-    days_iso = rfi["day"].cast(pl.Utf8).to_list()
-    days_dt = [np.datetime64(f"{d[:4]}-{d[4:6]}-{d[6:8]}", "D") for d in days_iso]
-    l1 = rfi["L1_jam_max"].cast(pl.Float64).to_numpy()
-    speed = rfi["speed_avg_m_s"].cast(pl.Float64).to_numpy()
-    at_port = speed < 0.5
-    ax_ts.bar(days_dt, l1, width=2.0,
-              color=["#D62728" if p else "#FF7F0E" for p in at_port],
-              edgecolor="black", linewidth=0.4)
-    ax_ts.axhline(60, color="0.5", linestyle="--", linewidth=0.6)
-    ax_ts.set_ylabel("L1 jamInd peak")
-    ax_ts.set_xlabel("Date (UTC)")
-    ax_ts.set_title("Time series of strong-RFI days  "
-                    "(red = at-port, orange = in transit; dashed = anomaly threshold 60)")
-    ax_ts.tick_params(axis="x", rotation=20)
-
-    fig.suptitle("Strong L1-band radio-frequency interference events  "
-                 "(ZED-F9P-15B, full cruise)", y=0.995)
+    ax_map.set_title("Strong L1-band RFI events along the cruise  "
+                     "(ZED-F9P-15B, full cruise; L1 jamInd peak per day)")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)

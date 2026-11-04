@@ -116,12 +116,13 @@ def _classify_region(port: str) -> str:
     return "Other"
 
 
+# Okabe-Ito CVD-safe palette (https://jfly.uni-koeln.de/color/).
 REGION_COLOR = {
-    "Mediterranean":   "#1F77B4",
-    "Lyttelton (NZ)":  "#2CA02C",
-    "Antarctic":       "#D62728",
-    "Tropics":         "#FF7F0E",
-    "Other":           "#7F7F7F",
+    "Mediterranean":   "#0072B2",  # blue
+    "Lyttelton (NZ)":  "#E69F00",  # orange
+    "Antarctic":       "#009E73",  # green
+    "Tropics":         "#CC79A7",  # reddish-purple
+    "Other":           "#999999",  # neutral grey
 }
 
 
@@ -173,13 +174,15 @@ def render(out_path: Path, *, eps_m: float, min_visits: int, cfg: dict | None = 
     ax.invert_yaxis()
     ax.grid(axis="x", linewidth=0.3, alpha=0.5)
     ax.set_axisbelow(True)
-    handles = [plt.Rectangle((0, 0), 1, 1, color=c) for c in REGION_COLOR.values()]
-    # Legend pinned outside the axes (bottom-centre) so it cannot overlap
-    # the long per-bar σ/n annotations on the right of the chart.
+    # Legend for the regions that have a bar, in the upper right of the axes.
+    # The bars are sorted by increasing σ from the top, so this corner stays
+    # clear of the bars, their σ/n annotations and the x-axis label.
+    shown = [r for r in REGION_COLOR if r in regions]
+    handles = [plt.Rectangle((0, 0), 1, 1, facecolor=REGION_COLOR[r],
+                             edgecolor="black", linewidth=0.4) for r in shown]
     ax.legend(
-        handles, list(REGION_COLOR.keys()),
-        loc="upper center", bbox_to_anchor=(0.5, -0.12),
-        ncols=len(REGION_COLOR), fontsize=8, framealpha=0.9,
+        handles, shown,
+        loc="upper right", fontsize=8, framealpha=0.9,
         title="Region", title_fontsize=8,
     )
     fig.tight_layout()

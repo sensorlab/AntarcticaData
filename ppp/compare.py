@@ -50,6 +50,10 @@ _MJD_UNIX_EPOCH_DAYS = 40587
 # timestamps to align with onboard.
 _GPS_UTC_LEAP_S = 18
 
+# Largest time difference between a PPP epoch and the onboard epoch it is
+# compared with (see compare_day).
+MATCH_TOL_S = 0.1
+
 
 def _find_pride_kin(day: str, cfg: dict) -> Path | None:
     """Locate the PRIDE kin output across naming/layout variants:
@@ -61,9 +65,10 @@ def _find_pride_kin(day: str, cfg: dict) -> Path | None:
         ahead, so observations near 00:00 UTC end up tagged with the
         previous DOY by PRIDE.)
 
-    Strategy: recursively glob any ``kin_*`` file under ``<out>/<YYYY>/``
-    (excluding the ``product/`` subtree), then fall back to legacy names.
-    Returns the first match.
+    Strategy: recursively glob any ``kin_*`` file under ``<out>/<year>/``
+    for every year folder (the 1 January file starts on 31 December, so its
+    session folder is under the previous year), excluding the ``product/``
+    subtree, then fall back to legacy names. Returns the first match.
     """
     out_dir = resolve_path(cfg["paths"]["ppp"]) / day
     if not out_dir.exists():
@@ -75,9 +80,8 @@ def _find_pride_kin(day: str, cfg: dict) -> Path | None:
            - date(int(yyyy), 1, 1)).days + 1
     stamp = f"{yyyy}{doy:03d}"
 
-    # 1) Glob anywhere under <out>/<yyyy>/, skipping the products dir
-    year_root = out_dir / yyyy
-    if year_root.exists():
+    # 1) Glob anywhere under <out>/<year>/, skipping the products dir
+    for year_root in sorted(out_dir.glob("[0-9][0-9][0-9][0-9]")):
         for path in sorted(year_root.rglob("kin_*")):
             if "product" in path.parts:
                 continue
@@ -194,14 +198,15 @@ def _read_pride_ztd(day: str, cfg: dict) -> pl.DataFrame:
            - date(int(yyyy), 1, 1)).days + 1
     stamp = f"{yyyy}{doy:03d}"
     path: Path | None = None
-    year_root = out_dir / yyyy
-    if year_root.exists():
+    for year_root in sorted(out_dir.glob("[0-9][0-9][0-9][0-9]")):
         for cand in sorted(year_root.rglob("ztd_*")):
             if "product" in cand.parts:
                 continue
             if cand.is_file():
                 path = cand
                 break
+        if path is not None:
+            break
     if path is None:
         for c in (out_dir / f"ztd_{stamp}", out_dir / "ztd.txt"):
             if c.exists():
@@ -252,29 +257,33 @@ def _read_pride_ztd(day: str, cfg: dict) -> pl.DataFrame:
     return pl.DataFrame(rows).sort("t_ns") if rows else pl.DataFrame()
 
 
-def _llh_to_enu(
-    lat_ref: float, lon_ref: float, lat: np.ndarray, lon: np.ndarray, h: np.ndarray,
-    h_ref: float,
+def _enu_difference(
+    lat_ref: np.ndarray, lon_ref: np.ndarray, h_ref: np.ndarray,
+    lat: np.ndarray, lon: np.ndarray, h: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Local ENU residuals (m) about (lat_ref, lon_ref, h_ref).
+    """East, north and up difference (m) of (lat, lon, h) minus the reference
+    position, epoch by epoch, in the local frame of each reference position.
 
-    Adequate for residuals — small-angle approximation; we don't need a
-    full ECEF rotation because the per-epoch reference moves with the
-    onboard fix.
+    The two positions of an epoch are metres apart, so the first-order
+    expansion with the GRS80 radii of curvature at the reference latitude is
+    exact to well below a millimetre. The scale factors must be evaluated at
+    each epoch's own latitude: with a single reference latitude per day, the
+    east component of a ship that changes latitude is scaled by
+    cos(lat_ref) / cos(lat), by up to 20 % on high-latitude days.
     """
-    R = 6_378_137.0
-    # Wrap lat/lon deltas to the shortest signed difference. Without this,
-    # a crossing of the antimeridian (lon ~ +/-180) produces ~40000 km of
-    # spurious east displacement; without lat-wrap we'd never see it but
-    # the symmetry is cheap insurance.
-    dlon_deg = ((lon - lon_ref + 180.0) % 360.0) - 180.0
-    dlat_deg = ((lat - lat_ref + 90.0) % 180.0) - 90.0
-    dlat = np.deg2rad(dlat_deg)
-    dlon = np.deg2rad(dlon_deg)
-    n = R * dlat
-    e = R * np.cos(np.deg2rad(lat_ref)) * dlon
-    u = h - h_ref
-    return e, n, u
+    a = 6_378_137.0
+    e2 = 6.694380022900e-3                      # GRS80 first eccentricity squared
+    phi = np.deg2rad(lat_ref)
+    w = np.sqrt(1.0 - e2 * np.sin(phi) ** 2)
+    n_rad = a / w                                # prime vertical radius
+    m_rad = a * (1.0 - e2) / w ** 3              # meridian radius
+    # Wrap the longitude difference across the antimeridian.
+    dlon = np.deg2rad(((lon - lon_ref + 180.0) % 360.0) - 180.0)
+    dlat = np.deg2rad(lat - lat_ref)
+    de = (n_rad + h_ref) * np.cos(phi) * dlon
+    dn = (m_rad + h_ref) * dlat
+    du = h - h_ref
+    return de, dn, du
 
 
 def compare_day(day: str, cfg: dict | None = None) -> dict | None:
@@ -306,7 +315,11 @@ def compare_day(day: str, cfg: dict | None = None) -> dict | None:
         ]
     ).select(["t_ns", "lat_ob", "lon_ob", "h_ob", "hAcc_m", "vAcc_m"]).sort("t_ns")
 
-    # Nearest-neighbour merge within ±0.5 s (PRIDE is 1 Hz, onboard 2 Hz).
+    # Pair each PPP epoch with the onboard epoch of the same instant. PPP is
+    # 1 Hz and its epochs lie within ~20 ms of an onboard (2 Hz) epoch; with a
+    # 0.5 s tolerance the other onboard epoch, half a second away, would be
+    # paired too, and the ship's motion in that half second (about 3 m at
+    # 12 kn) would enter the difference.
     pride_sel = (
         pride.rename({"lat": "lat_pp", "lon": "lon_pp", "h_ell": "h_pp"})
              .select(["t_ns", "lat_pp", "lon_pp", "h_pp", "pdop", "nsat"])
@@ -316,32 +329,22 @@ def compare_day(day: str, cfg: dict | None = None) -> dict | None:
         pride_sel,
         on="t_ns",
         strategy="nearest",
-        tolerance=int(0.5e9),
+        tolerance=int(MATCH_TOL_S * 1e9),
     ).drop_nulls(subset=["lat_pp", "lon_pp", "h_pp"])
 
     if joined.is_empty():
         log.warning("No time-overlap matches for %s", day)
         return None
 
-    e, n, u = _llh_to_enu(
-        lat_ref=joined["lat_ob"].to_numpy()[0],
-        lon_ref=joined["lon_ob"].to_numpy()[0],
+    # PPP minus onboard, in the local frame of each onboard epoch.
+    de, dn, du = _enu_difference(
+        lat_ref=joined["lat_ob"].to_numpy(),
+        lon_ref=joined["lon_ob"].to_numpy(),
+        h_ref=joined["h_ob"].to_numpy(),
         lat=joined["lat_pp"].to_numpy(),
         lon=joined["lon_pp"].to_numpy(),
         h=joined["h_pp"].to_numpy(),
-        h_ref=joined["h_ob"].to_numpy()[0],
     )
-    e_ob, n_ob, u_ob = _llh_to_enu(
-        lat_ref=joined["lat_ob"].to_numpy()[0],
-        lon_ref=joined["lon_ob"].to_numpy()[0],
-        lat=joined["lat_ob"].to_numpy(),
-        lon=joined["lon_ob"].to_numpy(),
-        h=joined["h_ob"].to_numpy(),
-        h_ref=joined["h_ob"].to_numpy()[0],
-    )
-    de = e - e_ob
-    dn = n - n_ob
-    du = u - u_ob
     d3d = np.sqrt(de**2 + dn**2 + du**2)
 
     diff = joined.with_columns(

@@ -14,6 +14,7 @@ just maps a friendlier ``--stage`` name to a snakemake target.
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 import sys
@@ -50,7 +51,11 @@ STAGE_TARGETS = {
     help="Comma-separated YYYYMMDD list to restrict the run",
 )
 @click.option("--keepgoing/--no-keepgoing", default=True, show_default=True)
-def cli(stage: str, cores: int, dry_run: bool, days: str | None, keepgoing: bool) -> None:
+@click.option("--config-name", default="pipeline", show_default=True,
+              help="Pipeline config to use (config/<name>.yaml). "
+                   "Sets ANTARCTICA_PIPELINE for the whole DAG.")
+def cli(stage: str, cores: int, dry_run: bool, days: str | None, keepgoing: bool,
+        config_name: str) -> None:
     targets = STAGE_TARGETS[stage]
     cmd = ["snakemake", "--cores", str(cores), "-p", *targets]
     if dry_run:
@@ -59,8 +64,10 @@ def cli(stage: str, cores: int, dry_run: bool, days: str | None, keepgoing: bool
         cmd.append("--keep-going")
     if days:
         cmd.extend(["--config", f"days={days}"])
-    print("$", " ".join(shlex.quote(c) for c in cmd))
-    rc = subprocess.call(cmd, cwd=CODE_DIR)
+    env = os.environ.copy()
+    env["ANTARCTICA_PIPELINE"] = config_name
+    print(f"$ ANTARCTICA_PIPELINE={config_name}", " ".join(shlex.quote(c) for c in cmd))
+    rc = subprocess.call(cmd, cwd=CODE_DIR, env=env)
     sys.exit(rc)
 
 
