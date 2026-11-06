@@ -239,7 +239,7 @@ If you use the code, please cite the paper and the dataset:
 > Bertalanič, B., Dimc, F., and Blatnik, A.: A multi-band, multi-constellation
 > shipborne GNSS dataset from a 216-day closed-loop voyage between Europe and
 > Antarctica, Earth Syst. Sci. Data (accepted), discussion paper:
-> <https://doi.org/10.5194/essd-2026-223>, 2026.
+> <https://doi.org/10.5194/essd-2026-432>, 2026.
 
 > Blatnik, A., Bertalanič, B., and Dimc, F.: A Comprehensive GNSS Dataset from the
 > 41st Laura Bassi Expedition to Antarctica, Zenodo [data set],
