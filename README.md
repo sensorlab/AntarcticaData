@@ -11,7 +11,7 @@ health telemetry to one `.ubx` file per day (216 files, 176.9 GB).
 - Data paper: Bertalanič, B., Dimc, F., and Blatnik, A.: *A multi-band,
   multi-constellation shipborne GNSS dataset from a 216-day closed-loop voyage
   between Europe and Antarctica*, Earth System Science Data (accepted).
-  Discussion paper: <https://doi.org/10.5194/essd-2026-223>
+  Discussion paper: <https://doi.org/10.5194/essd-2026-432>
 - Dataset (Zenodo, CC-BY 4.0): <https://doi.org/10.5281/zenodo.20344100>
   (concept DOI, resolves to the latest version)
 - Code: MIT licence. Version **v1.1** is the version used in the paper.
